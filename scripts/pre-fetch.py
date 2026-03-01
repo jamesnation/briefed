@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pre-fetch.py — Fetch newsletters from Gmail and produce a compact JSON
+pre-fetch.py — Fetch newsletters from Gmail API and produce compact JSON
 that Haiku can read without context overflow.
 
 Writes newsletter-inbox.json with just the fields needed for summarisation:
@@ -8,10 +8,18 @@ Writes newsletter-inbox.json with just the fields needed for summarisation:
 
 Usage: python3 pre-fetch.py
 """
-import json, subprocess, sys, os, re
+import json, sys, os, re
+from datetime import datetime, timezone
+
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 
 INBOX_FILE = os.path.join(os.path.dirname(__file__), '..', '..', 'newsletter-inbox.json')
-ACCOUNT = os.environ.get('NEWSLETTER_ACCOUNT', 'your@gmail.com')
+TOKEN_FILE = os.environ.get('BRIEFED_GMAIL_TOKEN_FILE', os.path.expanduser('~/.openclaw/workspace/briefed-gmail-token.json'))
+CLIENT_SECRET_FILE = os.environ.get('BRIEFED_GMAIL_CLIENT_SECRET', os.path.expanduser('~/client_secret.json'))
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
 # Subject/sender substrings that mark an email as transactional (case-insensitive)
 SKIP_SUBJECT_PATTERNS = [
@@ -23,21 +31,21 @@ SKIP_SUBJECT_PATTERNS = [
     'account activity statement',
     "you've got new correspondence",
     'we sent your payout',
-    "we've found you",        # Rightmove / Zoopla property alerts
+    "we've found you",
     'new property alert',
-    'property in ',           # "X properties in Town"
+    'property in ',
     'properties in ',
     'pre-order ',
     'simpler pricing',
     'data writes',
     'api access is turned off',
     'your claude api',
-    'members info',           # venue/studio admin emails
+    'members info',
     '72-hour reminder',
-    'seiko',                  # eBay search alert for specific item
-    '1 new!',                 # eBay search alert
-    'suggested properties',   # property agent alerts
-    'book now!',              # event/venue marketing
+    'seiko',
+    '1 new!',
+    'suggested properties',
+    'book now!',
     'identity document expires',
     'document renewal',
     'renewal reminder',
@@ -47,7 +55,6 @@ SKIP_SUBJECT_PATTERNS = [
     'linkedin notification',
 ]
 
-# Sender names/domains that are always transactional
 SKIP_SENDERS = [
     'ebay', 'rightmove', 'zoopla', 'trading 212', 'tsb',
     'barclays', 'hsbc', 'natwest', 'lloyds',
@@ -55,88 +62,126 @@ SKIP_SENDERS = [
     'kucoin', 'locrating',
 ]
 
+
+def get_gmail_service():
+    creds = None
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not os.path.exists(CLIENT_SECRET_FILE):
+                raise RuntimeError(
+                    f"Missing OAuth client file: {CLIENT_SECRET_FILE}\n"
+                    "Set BRIEFED_GMAIL_CLIENT_SECRET to your Google OAuth client JSON."
+                )
+            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+            creds = flow.run_local_server(port=0, open_browser=True)
+
+        os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+        with open(TOKEN_FILE, 'w') as token:
+            token.write(creds.to_json())
+
+    return build('gmail', 'v1', credentials=creds, cache_discovery=False)
+
+
 def is_transactional(subject, sender):
-    subj = subject.lower()
-    send = sender.lower()
-    if any(p in subj for p in SKIP_SUBJECT_PATTERNS):
-        return True
-    if any(p in send for p in SKIP_SENDERS):
-        return True
-    return False
+    subj = (subject or '').lower()
+    send = (sender or '').lower()
+    return any(p in subj for p in SKIP_SUBJECT_PATTERNS) or any(p in send for p in SKIP_SENDERS)
+
 
 def get_sender_name(from_header):
-    """Extract just the name from 'Name <email@example.com>'"""
-    m = re.match(r'^"?([^"<]+)"?\s*(?:<[^>]+>)?$', from_header.strip())
+    m = re.match(r'^"?([^"<]+)"?\s*(?:<[^>]+>)?$', (from_header or '').strip())
     if m:
         name = m.group(1).strip().strip('"')
-        return name if name else from_header
-    return from_header
+        return name if name else (from_header or '')
+    return from_header or ''
+
+
+def headers_map(payload):
+    out = {}
+    for h in payload.get('headers', []):
+        name = h.get('name', '').lower()
+        if name:
+            out[name] = h.get('value', '')
+    return out
+
+
+def fallback_date(msg):
+    internal = msg.get('internalDate')
+    if internal:
+        try:
+            ts = int(internal) / 1000
+            return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        except Exception:
+            pass
+    return ''
+
 
 def main():
-    print('Fetching newsletter list...', flush=True)
+    print('Connecting to Gmail API...', flush=True)
     try:
-        r = subprocess.run(
-            ['gog', 'gmail', 'search',
-             'category:updates OR category:promotions newer_than:1d',
-             '--account', ACCOUNT, '--max', '30', '--json'],
-            capture_output=True, text=True, timeout=60
-        )
-        results = json.loads(r.stdout)
+        service = get_gmail_service()
     except Exception as e:
-        print(f'Error fetching email list: {e}', file=sys.stderr)
+        print(f'Auth error: {e}', file=sys.stderr)
         sys.exit(1)
 
-    threads = results if isinstance(results, list) else results.get('threads', results.get('messages', []))
-    print(f'Found {len(threads)} emails. Filtering...', flush=True)
+    query = 'category:updates OR category:promotions newer_than:1d'
+    print('Fetching newsletter list...', flush=True)
+    try:
+        resp = service.users().messages().list(userId='me', q=query, maxResults=30).execute()
+        messages = resp.get('messages', [])
+    except Exception as e:
+        print(f'Error fetching list: {e}', file=sys.stderr)
+        sys.exit(1)
+
+    print(f'Found {len(messages)} emails. Filtering...', flush=True)
 
     newsletters = []
     seen_threads = set()
 
-    for item in threads:
-        tid = item.get('threadId') or item.get('id')
-        if not tid or tid in seen_threads:
+    for m in messages:
+        msg_id = m.get('id')
+        thread_id = m.get('threadId')
+        if not msg_id or not thread_id or thread_id in seen_threads:
             continue
-        seen_threads.add(tid)
+        seen_threads.add(thread_id)
 
         try:
-            r2 = subprocess.run(
-                ['gog', 'gmail', 'show', tid, '--account', ACCOUNT, '--json'],
-                capture_output=True, text=True, timeout=30
-            )
-            raw = json.loads(r2.stdout)
+            full = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
         except Exception as e:
-            print(f'  Skip {tid}: {e}', file=sys.stderr)
+            print(f'  Skip {thread_id}: {e}', file=sys.stderr)
             continue
 
-        msg = raw.get('message', raw)
-        headers_list = msg.get('payload', {}).get('headers', [])
-        headers = {h['name'].lower(): h['value'] for h in headers_list}
-
-        subject = headers.get('subject', '(no subject)')
-        from_raw = headers.get('from', '')
-        source = get_sender_name(from_raw)
-        date = headers.get('date', '')
-        snippet = msg.get('snippet', '')
+        payload = full.get('payload', {})
+        h = headers_map(payload)
+        subject = h.get('subject', '(no subject)')
+        source = get_sender_name(h.get('from', ''))
+        date = h.get('date', '') or fallback_date(full)
+        snippet = (full.get('snippet') or '')[:400]
 
         if is_transactional(subject, source):
             print(f'  SKIP (transactional): {source} — {subject[:50]}')
             continue
 
         newsletters.append({
-            'threadId': tid,
-            'messageId': msg.get('id', tid),
+            'threadId': thread_id,
+            'messageId': msg_id,
             'source': source,
             'subject': subject,
-            'snippet': snippet[:400],  # cap at 400 chars
+            'snippet': snippet,
             'date': date,
         })
         print(f'  KEEP: {source} — {subject[:60]}')
 
-    output = {'count': len(newsletters), 'newsletters': newsletters}
     with open(INBOX_FILE, 'w') as f:
-        json.dump(output, f, indent=2)
+        json.dump({'count': len(newsletters), 'newsletters': newsletters}, f, indent=2)
 
     print(f'\nDone. {len(newsletters)} newsletters written to newsletter-inbox.json')
+
 
 if __name__ == '__main__':
     main()
