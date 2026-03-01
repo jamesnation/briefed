@@ -1,6 +1,20 @@
 ---
 name: briefed
 description: Set up and run a personal AI newsletter intelligence system called Briefed. Fetches Gmail newsletters daily, uses Claude Haiku to extract article summaries, and serves a polished local web reader app with voting, notes, and interest tracking. Use when a user asks to set up a newsletter reader, daily digest, inbox intelligence tool, or newsletter summariser with OpenClaw.
+metadata:
+  openclaw:
+    requires:
+      env:
+        - BRIEFED_GMAIL_CLIENT_SECRET
+      optionalEnv:
+        - BRIEFED_GMAIL_TOKEN_FILE
+        - NEWSLETTER_ACCOUNT
+      files:
+        - ~/.openclaw/workspace/newsletter-inbox.json
+        - ~/.openclaw/workspace/newsletter-today.json
+        - ~/.openclaw/workspace/newsletter-interests.json
+        - ~/.openclaw/workspace/newsletter-notes.json
+        - ~/.openclaw/workspace/reading-list.md
 ---
 
 # Briefed
@@ -22,6 +36,18 @@ A daily newsletter digest pipeline + local web reader. Gmail → Haiku summaries
 ```
 
 **Why split fetch/summarise?** Raw Gmail API JSON overflows Haiku's context. Python handles data wrangling; Haiku handles cognition.
+
+## Security & Scope
+
+- Gmail access is **read-only** (`gmail.readonly`).
+- OAuth token is stored locally at `~/.openclaw/workspace/briefed-gmail-token.json` (or `BRIEFED_GMAIL_TOKEN_FILE`).
+- The workflow should only read/write the following workspace files:
+  - `newsletter-inbox.json`
+  - `newsletter-today.json`
+  - `newsletter-interests.json`
+  - `newsletter-notes.json`
+  - `reading-list.md`
+- Do not send newsletter content to external endpoints other than the configured model provider and user-selected notification channel.
 
 ## Prerequisites
 
@@ -141,7 +167,8 @@ Run: python3 ~/.openclaw/workspace/briefed/scripts/pre-fetch.py
 Read: ~/.openclaw/workspace/newsletter-inbox.json
 
 ## Step 3 — Write newsletter-today.json with AI summaries
-For each newsletter, write to ~/.openclaw/workspace/newsletter-today.json.
+For each newsletter, write to **only** this file: ~/.openclaw/workspace/newsletter-today.json.
+Do not modify any other files in this step.
 Use the snippet field to write real summaries — do NOT just repeat the subject line.
 Score by interest: (adjust topics and weights to match your interests)
   ai/ml=0.9, startups=0.85, design=0.8, finance=0.75, general=0.6
