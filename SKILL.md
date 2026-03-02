@@ -117,7 +117,9 @@ Create `~/.openclaw/workspace/newsletter-interests.json` (or let it be auto-crea
 }
 ```
 
-### 6. Start the reader (macOS LaunchAgent for auto-start)
+### 6. Start the reader
+
+Run manually if you prefer no persistence. LaunchAgent is optional convenience for auto-start.
 
 ```bash
 # Quick test

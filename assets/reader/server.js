@@ -100,12 +100,18 @@ app.post('/api/save', (req, res) => {
     // Append to reading-list.md
     const ts = new Date().toISOString();
     const date = ts.slice(0, 10);
-    let entry = `\n## ${story ? story.headline : storyId}\n`;
+    const safeHeadline = escapeMarkdown(story ? story.headline : storyId);
+    const safeSource = escapeMarkdown(story ? story.source : 'Unknown');
+    const safeId = escapeMarkdown(storyId);
+    const safeNote = note ? escapeMarkdown(note) : '';
+    const safeGmailUrl = sanitizeUrl(story?.gmailUrl);
+
+    let entry = `\n## ${safeHeadline}\n`;
     entry += `- **Date saved:** ${date}\n`;
-    entry += `- **Source:** ${story ? story.source : 'Unknown'}\n`;
-    if (story?.gmailUrl) entry += `- **Link:** [Open in Gmail](${story.gmailUrl})\n`;
-    if (note) entry += `- **Note:** ${note}\n`;
-    entry += `- **ID:** ${storyId}\n`;
+    entry += `- **Source:** ${safeSource}\n`;
+    if (safeGmailUrl) entry += `- **Link:** [Open in Gmail](${safeGmailUrl})\n`;
+    if (safeNote) entry += `- **Note:** ${safeNote}\n`;
+    entry += `- **ID:** ${safeId}\n`;
 
     fs.appendFileSync(READING_LIST_FILE, entry);
 
@@ -171,6 +177,25 @@ function readInterests() {
 
 function writeInterests(data) {
   fs.writeFileSync(INTERESTS_FILE, JSON.stringify(data, null, 2));
+}
+
+function escapeMarkdown(input) {
+  return String(input || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/([`*_{}[\]()#+\-.!|>])/g, '\\$1')
+    .replace(/[\r\n]+/g, ' ')
+    .trim();
+}
+
+function sanitizeUrl(url) {
+  if (!url) return null;
+  try {
+    const u = new URL(String(url));
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
 }
 
 // Start server
