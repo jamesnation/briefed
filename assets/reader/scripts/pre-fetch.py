@@ -17,6 +17,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 INBOX_FILE = os.path.join(os.path.dirname(__file__), '..', '..', 'newsletter-inbox.json')
+FILTER_CONFIG_FILE = os.path.join(os.path.dirname(__file__), '..', 'config', 'filter-rules.json')
+SKIP_LOG_FILE = os.path.join(os.path.dirname(__file__), '..', '..', 'newsletter-filter-skips.jsonl')
 TOKEN_FILE = os.environ.get('BRIEFED_GMAIL_TOKEN_FILE', os.path.expanduser('~/.openclaw/workspace/briefed-gmail-token.json'))
 CLIENT_SECRET_FILE = os.environ.get('BRIEFED_GMAIL_CLIENT_SECRET', os.path.expanduser('~/client_secret.json'))
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
@@ -53,6 +55,15 @@ SKIP_SUBJECT_PATTERNS = [
     'withdrawal privileges',
     'you have a new message from linkedin',
     'linkedin notification',
+    'booking is confirmed',
+    'your dependabot alerts',
+    'mortgage deal ending soon',
+    'find your fit',
+    'help shape the future',
+    'survey',
+    'questionnaire',
+    'your appointment',
+    'appointment confirmation',
 ]
 
 SKIP_SENDERS = [
@@ -60,7 +71,45 @@ SKIP_SENDERS = [
     'barclays', 'hsbc', 'natwest', 'lloyds',
     'amazon', 'paypal', 'stripe',
     'kucoin', 'locrating',
+    'github',
+    'better',
+    'mangools',
+    'l&c',
 ]
+
+SKIP_SNIPPET_PATTERNS = [
+    'booking is confirmed',
+    'you can find full details of your booking',
+    'if your current mortgage deal',
+    'security alert digest',
+    'enable location sharing',
+]
+
+
+def load_filter_rules():
+    if not os.path.exists(FILTER_CONFIG_FILE):
+        return {
+            'skipSubjectPatterns': SKIP_SUBJECT_PATTERNS,
+            'skipSenders': SKIP_SENDERS,
+            'skipSnippetPatterns': SKIP_SNIPPET_PATTERNS,
+        }
+
+    try:
+        with open(FILTER_CONFIG_FILE, 'r') as f:
+            raw = json.load(f)
+    except Exception as e:
+        print(f'Warning: failed to load filter config ({e}), using defaults.', file=sys.stderr)
+        return {
+            'skipSubjectPatterns': SKIP_SUBJECT_PATTERNS,
+            'skipSenders': SKIP_SENDERS,
+            'skipSnippetPatterns': SKIP_SNIPPET_PATTERNS,
+        }
+
+    return {
+        'skipSubjectPatterns': raw.get('skipSubjectPatterns', SKIP_SUBJECT_PATTERNS),
+        'skipSenders': raw.get('skipSenders', SKIP_SENDERS),
+        'skipSnippetPatterns': raw.get('skipSnippetPatterns', SKIP_SNIPPET_PATTERNS),
+    }
 
 
 def get_gmail_service():
@@ -87,10 +136,45 @@ def get_gmail_service():
     return build('gmail', 'v1', credentials=creds, cache_discovery=False)
 
 
-def is_transactional(subject, sender):
+def is_transactional(subject, sender, rules):
     subj = (subject or '').lower()
     send = (sender or '').lower()
-    return any(p in subj for p in SKIP_SUBJECT_PATTERNS) or any(p in send for p in SKIP_SENDERS)
+    return any(p in subj for p in rules['skipSubjectPatterns']) or any(p in send for p in rules['skipSenders'])
+
+
+def is_transactional_snippet(snippet, rules):
+    body = (snippet or '').lower()
+    return any(p in body for p in rules['skipSnippetPatterns'])
+
+
+def skip_reason(subject, sender, snippet, rules):
+    subj = (subject or '').lower()
+    send = (sender or '').lower()
+    body = (snippet or '').lower()
+    for p in rules['skipSubjectPatterns']:
+        if p in subj:
+            return f'subject:{p}'
+    for p in rules['skipSenders']:
+        if p in send:
+            return f'sender:{p}'
+    for p in rules['skipSnippetPatterns']:
+        if p in body:
+            return f'snippet:{p}'
+    return 'unknown'
+
+
+def append_skip_log(thread_id, source, subject, snippet, reason):
+    entry = {
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'threadId': thread_id,
+        'source': source,
+        'subject': subject,
+        'snippet': (snippet or '')[:160],
+        'reason': reason,
+    }
+    os.makedirs(os.path.dirname(SKIP_LOG_FILE), exist_ok=True)
+    with open(SKIP_LOG_FILE, 'a') as f:
+        f.write(json.dumps(entry) + '\n')
 
 
 def get_sender_name(from_header):
@@ -122,6 +206,11 @@ def fallback_date(msg):
 
 
 def main():
+    rules = load_filter_rules()
+    print(
+        f"Loaded filter rules: subjects={len(rules['skipSubjectPatterns'])}, senders={len(rules['skipSenders'])}, snippets={len(rules['skipSnippetPatterns'])}",
+        flush=True,
+    )
     print('Connecting to Gmail API...', flush=True)
     try:
         service = get_gmail_service()
@@ -163,8 +252,10 @@ def main():
         date = h.get('date', '') or fallback_date(full)
         snippet = (full.get('snippet') or '')[:400]
 
-        if is_transactional(subject, source):
-            print(f'  SKIP (transactional): {source} — {subject[:50]}')
+        if is_transactional(subject, source, rules) or is_transactional_snippet(snippet, rules):
+            reason = skip_reason(subject, source, snippet, rules)
+            append_skip_log(thread_id, source, subject, snippet, reason)
+            print(f'  SKIP (transactional): {source} — {subject[:50]} [{reason}]')
             continue
 
         newsletters.append({
