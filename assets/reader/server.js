@@ -5,22 +5,44 @@ const path = require('path');
 
 const app = express();
 const PORT = Number(process.env.BRIEFED_PORT) || 3001;
-// Loopback only by default. Set BRIEFED_HOST (e.g. 0.0.0.0 or a Tailscale IP)
-// to reach the reader from another device — this requires BRIEFED_TOKEN.
+// Loopback only by default. Two ways to read on another device, both need BRIEFED_TOKEN:
+//  - Recommended: keep the loopback bind and put an HTTPS proxy in front
+//    (e.g. `tailscale serve`), listing its hostname in BRIEFED_ALLOWED_HOSTS.
+//  - Bind BRIEFED_HOST to a Tailscale IP (encrypted by WireGuard), or to any
+//    other address with BRIEFED_ALLOW_PLAIN_HTTP=1 (token sent unencrypted).
 const HOST = process.env.BRIEFED_HOST || '127.0.0.1';
 const TOKEN = process.env.BRIEFED_TOKEN || '';
+const ALLOWED_HOSTS = (process.env.BRIEFED_ALLOWED_HOSTS || '')
+  .split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
+const ALLOW_PLAIN_HTTP = process.env.BRIEFED_ALLOW_PLAIN_HTTP === '1';
 const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1'];
 const IS_LOOPBACK = LOOPBACK_HOSTS.includes(HOST);
 const AUTH_COOKIE = 'briefed_token';
 
-if (!IS_LOOPBACK && TOKEN.length < 16) {
-  console.error(
-    `Refusing to listen on ${HOST} without authentication.\n` +
+function fail(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+if ((!IS_LOOPBACK || ALLOWED_HOSTS.length) && TOKEN.length < 16) {
+  fail(
+    'Remote access requires authentication.\n' +
     'Set BRIEFED_TOKEN to a random secret of at least 16 characters, e.g.:\n' +
     '  export BRIEFED_TOKEN=$(openssl rand -hex 24)'
   );
-  process.exit(1);
 }
+
+if (!IS_LOOPBACK && !isTailscaleAddress(HOST) && !ALLOW_PLAIN_HTTP) {
+  fail(
+    `Refusing to serve plain HTTP on ${HOST}: the token and your email would be sent unencrypted.\n` +
+    'Recommended: keep the default 127.0.0.1 bind and use `tailscale serve` for HTTPS (see SKILL.md).\n' +
+    'Or bind to your Tailscale IP, or set BRIEFED_ALLOW_PLAIN_HTTP=1 to accept the risk on a trusted network.'
+  );
+}
+
+// Behind a local HTTPS proxy (tailscale serve), trust its X-Forwarded-Proto
+// so req.secure is true and the auth cookie is marked Secure.
+app.set('trust proxy', 'loopback');
 
 // Paths
 const STORIES_FILE = path.join(__dirname, '..', 'newsletter-today.json');
@@ -51,9 +73,19 @@ app.use((req, res, next) => {
 // Reject requests whose Host header isn't this server (blocks DNS rebinding).
 app.use((req, res, next) => {
   if (!IS_LOOPBACK) return next(); // token auth covers remote mode
-  const host = (req.hostname || '').replace(/^\[|\]$/g, '');
-  if (LOOPBACK_HOSTS.includes(host)) return next();
+  const host = (req.hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
+  if (LOOPBACK_HOSTS.includes(host) || ALLOWED_HOSTS.includes(host)) return next();
   res.status(403).send('Forbidden');
+});
+
+// A proxied request on a loopback bind must still authenticate, even if the
+// proxy rewrites Host to 127.0.0.1.
+app.use((req, res, next) => {
+  const proxied = req.get('x-forwarded-for') || req.get('x-forwarded-host') || req.get('forwarded');
+  if (IS_LOOPBACK && proxied && !TOKEN) {
+    return res.status(403).send('Proxied access requires BRIEFED_TOKEN.');
+  }
+  next();
 });
 
 // Token auth (required in remote mode, optional locally). Visit /?token=...
@@ -66,6 +98,7 @@ app.use((req, res, next) => {
     res.cookie(AUTH_COOKIE, TOKEN, {
       httpOnly: true,
       sameSite: 'lax',
+      secure: req.secure,
       maxAge: 1000 * 60 * 60 * 24 * 90,
     });
     return res.redirect(req.path);
@@ -226,6 +259,13 @@ app.post('/api/note', (req, res) => {
 });
 
 // Helpers
+// Tailscale assigns 100.64.0.0/10 and fd7a:115c:a1e0::/48; that traffic is WireGuard-encrypted.
+function isTailscaleAddress(host) {
+  const v4 = host.match(/^100\.(\d+)\.\d+\.\d+$/);
+  if (v4) return Number(v4[1]) >= 64 && Number(v4[1]) <= 127;
+  return /^fd7a:115c:a1e0:/i.test(host);
+}
+
 function tokenMatches(candidate) {
   if (!TOKEN || typeof candidate !== 'string') return false;
   const a = crypto.createHash('sha256').update(candidate).digest();
@@ -294,6 +334,10 @@ app.listen(PORT, HOST, () => {
   const shownHost = HOST.includes(':') ? `[${HOST}]` : HOST;
   console.log(`📰 Briefed reader running at http://${shownHost}:${PORT}`);
   if (TOKEN) console.log('   Auth: token required (open the reader once with ?token=<BRIEFED_TOKEN>)');
+  if (ALLOWED_HOSTS.length) console.log(`   Proxy hosts: ${ALLOWED_HOSTS.join(', ')}`);
+  if (!IS_LOOPBACK && ALLOW_PLAIN_HTTP && !isTailscaleAddress(HOST)) {
+    console.warn('   ⚠️  Plain HTTP on a network address: the token and email content are not encrypted.');
+  }
   console.log(`   Stories: ${STORIES_FILE}`);
   console.log(`   Interests: ${INTERESTS_FILE}`);
 });

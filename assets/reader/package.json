@@ -1,6 +1,6 @@
 {
   "name": "briefed",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Local newsletter digest reader — powered by OpenClaw",
   "main": "server.js",
   "scripts": {
