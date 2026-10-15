@@ -15,6 +15,8 @@ metadata:
         - BRIEFED_HOST
         - BRIEFED_PORT
         - BRIEFED_TOKEN
+        - BRIEFED_ALLOWED_HOSTS
+        - BRIEFED_ALLOW_PLAIN_HTTP
       files:
         - ~/.openclaw/workspace/briefed-gmail-token.json
         - ~/.openclaw/workspace/newsletter-inbox.json
@@ -50,7 +52,7 @@ A daily newsletter digest pipeline + local web reader. Gmail → Haiku summaries
 
 - Gmail access is **read-only** (`gmail.readonly`). Briefed never sends, deletes, or modifies mail.
 - The OAuth token is stored locally at `~/.openclaw/workspace/briefed-gmail-token.json` (or `BRIEFED_GMAIL_TOKEN_FILE`) with owner-only (`0600`) permissions. All data files are written `0600` too.
-- The reader listens on **`127.0.0.1` only** and rejects requests with a foreign `Host` header. Remote access (e.g. from a phone) is opt-in and requires a token — see [Reading on another device](#reading-on-another-device).
+- The reader listens on **`127.0.0.1` only** and rejects requests with a foreign `Host` header. Remote access (e.g. from a phone) is opt-in, requires a token, and should go over HTTPS (Tailscale Serve). Unencrypted LAN access needs an explicit `BRIEFED_ALLOW_PLAIN_HTTP=1`. See [Reading on another device](#reading-on-another-device).
 - Email HTML renders in a sandboxed iframe with no script execution. Remote images are blocked by default so senders can't track opens; the user can load them per email.
 - The workflow should only read/write the workspace files listed in the metadata above, plus the skill's own directory.
 - Do not send newsletter content to external endpoints other than the configured model provider and the user-selected notification channel.
@@ -92,17 +94,9 @@ python3 -m pip install -r scripts/requirements.txt
 
 ### 3. Configure Gmail OAuth
 
-Create a Google Cloud OAuth Desktop app and download the client JSON, then set:
+Create a Google Cloud OAuth Desktop app and download its client JSON file. Set the `BRIEFED_GMAIL_CLIENT_SECRET` environment variable to the **path** of that file (default: `~/client_secret.json`). It is a file location, not a secret value; never paste the file's contents into an environment variable or chat.
 
-```bash
-export BRIEFED_GMAIL_CLIENT_SECRET=~/client_secret.json
-```
-
-Optionally override where the token is stored (default shown):
-
-```bash
-export BRIEFED_GMAIL_TOKEN_FILE=~/.openclaw/workspace/briefed-gmail-token.json
-```
+Optionally set `BRIEFED_GMAIL_TOKEN_FILE` to change where the OAuth token is stored (default: `~/.openclaw/workspace/briefed-gmail-token.json`).
 
 Then run the pre-fetch once manually to complete OAuth in a browser:
 
@@ -175,15 +169,28 @@ Cron schedule: `0 7 * * *` (7am daily), model: `anthropic/claude-haiku-4-5`, del
 
 ## Reading on another device
 
-By default the reader is only reachable from the machine it runs on. To read on a phone over your LAN or Tailscale, set a host and a token (the server refuses to bind a non-loopback address without one):
+By default the reader is only reachable from the machine it runs on. Remote access always requires `BRIEFED_TOKEN`, and the server refuses to start without one. Generate it with:
 
 ```bash
-export BRIEFED_HOST=0.0.0.0            # or your Tailscale IP
-export BRIEFED_TOKEN=$(openssl rand -hex 24)
-node ~/.openclaw/workspace/briefed/server.js
+openssl rand -hex 24
 ```
 
-Open `http://YOUR_HOST:3001/?token=<BRIEFED_TOKEN>` once per device; an HttpOnly cookie is set and the token is removed from the URL. Prefer Tailscale or another private network over exposing the port to an untrusted LAN, and never port-forward it to the internet.
+### Recommended: HTTPS via Tailscale Serve
+
+The reader keeps its `127.0.0.1` bind, and [Tailscale Serve](https://tailscale.com/kb/1312/serve) puts HTTPS in front of it, reachable only from your own tailnet devices:
+
+```bash
+tailscale serve --bg 3001
+```
+
+Start the reader with your machine's tailnet hostname (shown by `tailscale serve status`) in `BRIEFED_ALLOWED_HOSTS` and the token in `BRIEFED_TOKEN`. Then open `https://<machine>.<tailnet>.ts.net/?token=<token>` once per device. A Secure, HttpOnly cookie is set and the token is removed from the URL. Use the `https://…ts.net` address as `READER_URL` in the cron prompt.
+
+### Alternatives
+
+- **Tailscale IP, no Serve:** set `BRIEFED_HOST` to the machine's `100.x.y.z` Tailscale address. Traffic is encrypted by WireGuard, but the browser sees plain HTTP.
+- **Plain LAN (not recommended):** binding any other address (e.g. `0.0.0.0`) also requires `BRIEFED_ALLOW_PLAIN_HTTP=1`. The token and email content cross the network unencrypted, so only use this on a network you fully trust.
+
+Never port-forward the reader to the internet.
 
 ## Data Files
 

@@ -38,7 +38,7 @@ Briefed handles your email, so here is exactly what it does with it:
 - **Sent to your model provider:** subjects, sender names and short snippets of the last day's newsletters, so Haiku can summarise them. Nothing else leaves your machine, apart from the notification you configure.
 - **Stored locally, unencrypted:** email metadata, full newsletter HTML, your notes, votes, and reading list, all in `~/.openclaw/workspace/` with owner-only (`0600`) permissions.
 - **Interest signals:** opening a story records a local "open" signal, and votes and saves are recorded too. They are used only to rank future digests and stay in `newsletter-interests.json`.
-- **Reader exposure:** the reader listens on `127.0.0.1` only. Remote access is opt-in and requires a token (see `SKILL.md` → *Reading on another device*).
+- **Reader exposure:** the reader listens on `127.0.0.1` only. Remote access is opt-in and requires a token. The recommended setup is HTTPS via Tailscale Serve; plain-HTTP LAN access needs an explicit opt-in because the token would travel unencrypted (see `SKILL.md` → *Reading on another device*).
 - **Tracking pixels:** remote images in emails are blocked by default, so senders can't see when you read. Use **Load images** per email, or **Always** to opt out.
 
 ## Setup overview
@@ -74,7 +74,7 @@ Create `~/Library/LaunchAgents/ai.openclaw.briefed.plist`, replacing `YOUR_USER`
 </dict></plist>
 ```
 
-The reader doesn't need Gmail credentials, so none are passed to it. To enable remote access, add `BRIEFED_HOST` and `BRIEFED_TOKEN` under an `EnvironmentVariables` dict.
+The reader doesn't need Gmail credentials, so none are passed to it. For remote access, add `BRIEFED_TOKEN` and `BRIEFED_ALLOWED_HOSTS` (see `SKILL.md` → *Reading on another device*) under an `EnvironmentVariables` dict.
 
 ```bash
 launchctl load ~/Library/LaunchAgents/ai.openclaw.briefed.plist
