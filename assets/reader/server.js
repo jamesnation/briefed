@@ -1,9 +1,26 @@
 const express = require('express');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const PORT = 3001;
+const PORT = Number(process.env.BRIEFED_PORT) || 3001;
+// Loopback only by default. Set BRIEFED_HOST (e.g. 0.0.0.0 or a Tailscale IP)
+// to reach the reader from another device — this requires BRIEFED_TOKEN.
+const HOST = process.env.BRIEFED_HOST || '127.0.0.1';
+const TOKEN = process.env.BRIEFED_TOKEN || '';
+const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1'];
+const IS_LOOPBACK = LOOPBACK_HOSTS.includes(HOST);
+const AUTH_COOKIE = 'briefed_token';
+
+if (!IS_LOOPBACK && TOKEN.length < 16) {
+  console.error(
+    `Refusing to listen on ${HOST} without authentication.\n` +
+    'Set BRIEFED_TOKEN to a random secret of at least 16 characters, e.g.:\n' +
+    '  export BRIEFED_TOKEN=$(openssl rand -hex 24)'
+  );
+  process.exit(1);
+}
 
 // Paths
 const STORIES_FILE = path.join(__dirname, '..', 'newsletter-today.json');
@@ -11,7 +28,57 @@ const INTERESTS_FILE = path.join(__dirname, '..', 'newsletter-interests.json');
 const READING_LIST_FILE = path.join(__dirname, '..', 'reading-list.md');
 const NOTES_FILE = path.join(__dirname, '..', 'newsletter-notes.json');
 
-app.use(express.json());
+// Security headers. The email viewer is a srcdoc iframe, which inherits this
+// policy; it adds its own stricter policy that blocks remote images by default.
+app.use((req, res, next) => {
+  res.set({
+    'Content-Security-Policy': [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: https: http:",
+      "frame-src 'self'",
+      "frame-ancestors 'none'",
+      "base-uri 'none'",
+      "form-action 'none'",
+    ].join('; '),
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+  });
+  next();
+});
+
+// Reject requests whose Host header isn't this server (blocks DNS rebinding).
+app.use((req, res, next) => {
+  if (!IS_LOOPBACK) return next(); // token auth covers remote mode
+  const host = (req.hostname || '').replace(/^\[|\]$/g, '');
+  if (LOOPBACK_HOSTS.includes(host)) return next();
+  res.status(403).send('Forbidden');
+});
+
+// Token auth (required in remote mode, optional locally). Visit /?token=...
+// once; an HttpOnly cookie is set and the token is stripped from the URL.
+app.use((req, res, next) => {
+  if (!TOKEN) return next();
+
+  if (typeof req.query.token === 'string') {
+    if (!tokenMatches(req.query.token)) return res.status(401).send('Invalid token');
+    res.cookie(AUTH_COOKIE, TOKEN, {
+      httpOnly: true,
+      sameSite: 'lax',
+      maxAge: 1000 * 60 * 60 * 24 * 90,
+    });
+    return res.redirect(req.path);
+  }
+
+  const header = req.get('authorization') || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+  if (tokenMatches(readCookie(req, AUTH_COOKIE)) || tokenMatches(bearer)) return next();
+
+  res.status(401).send('Unauthorized — open the reader link that includes ?token=');
+});
+
+app.use(express.json({ limit: '64kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // GET / — serve SPA
@@ -52,7 +119,7 @@ app.get('/api/story/:id', (req, res) => {
 
 // POST /api/vote — record up/down vote
 app.post('/api/vote', (req, res) => {
-  const { storyId, vote } = req.body;
+  const { storyId, vote } = req.body || {};
   if (!storyId || !['up', 'down', 'open'].includes(vote)) {
     return res.status(400).json({ error: 'storyId and vote ("up", "down", or "open") required.' });
   }
@@ -84,7 +151,7 @@ app.post('/api/vote', (req, res) => {
 
 // POST /api/save — save to reading list
 app.post('/api/save', (req, res) => {
-  const { storyId, note } = req.body;
+  const { storyId, note } = req.body || {};
   if (!storyId) {
     return res.status(400).json({ error: 'storyId required.' });
   }
@@ -113,7 +180,7 @@ app.post('/api/save', (req, res) => {
     if (safeNote) entry += `- **Note:** ${safeNote}\n`;
     entry += `- **ID:** ${safeId}\n`;
 
-    fs.appendFileSync(READING_LIST_FILE, entry);
+    fs.appendFileSync(READING_LIST_FILE, entry, { mode: 0o600 });
 
     // Also add a save signal to interests
     const interests = readInterests();
@@ -140,7 +207,7 @@ app.get('/api/notes', (req, res) => {
 
 // POST /api/note — save or update a note for a story
 app.post('/api/note', (req, res) => {
-  const { storyId, note } = req.body;
+  const { storyId, note } = req.body || {};
   if (!storyId) return res.status(400).json({ error: 'storyId required.' });
 
   try {
@@ -159,13 +226,37 @@ app.post('/api/note', (req, res) => {
 });
 
 // Helpers
+function tokenMatches(candidate) {
+  if (!TOKEN || typeof candidate !== 'string') return false;
+  const a = crypto.createHash('sha256').update(candidate).digest();
+  const b = crypto.createHash('sha256').update(TOKEN).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+function readCookie(req, name) {
+  const header = req.get('cookie') || '';
+  for (const part of header.split(';')) {
+    const [k, ...v] = part.trim().split('=');
+    if (k === name) {
+      try { return decodeURIComponent(v.join('=')); } catch { return ''; }
+    }
+  }
+  return '';
+}
+
+// Email-derived data is private: write owner-only (0600).
+function writePrivate(file, contents) {
+  fs.writeFileSync(file, contents, { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+}
+
 function readNotes() {
   if (!fs.existsSync(NOTES_FILE)) return {};
   return JSON.parse(fs.readFileSync(NOTES_FILE, 'utf8'));
 }
 
 function writeNotes(data) {
-  fs.writeFileSync(NOTES_FILE, JSON.stringify(data, null, 2));
+  writePrivate(NOTES_FILE, JSON.stringify(data, null, 2));
 }
 
 function readInterests() {
@@ -176,7 +267,7 @@ function readInterests() {
 }
 
 function writeInterests(data) {
-  fs.writeFileSync(INTERESTS_FILE, JSON.stringify(data, null, 2));
+  writePrivate(INTERESTS_FILE, JSON.stringify(data, null, 2));
 }
 
 function escapeMarkdown(input) {
@@ -199,8 +290,10 @@ function sanitizeUrl(url) {
 }
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`📰 Newsletter Reader running at http://localhost:${PORT}`);
+app.listen(PORT, HOST, () => {
+  const shownHost = HOST.includes(':') ? `[${HOST}]` : HOST;
+  console.log(`📰 Briefed reader running at http://${shownHost}:${PORT}`);
+  if (TOKEN) console.log('   Auth: token required (open the reader once with ?token=<BRIEFED_TOKEN>)');
   console.log(`   Stories: ${STORIES_FILE}`);
   console.log(`   Interests: ${INTERESTS_FILE}`);
 });

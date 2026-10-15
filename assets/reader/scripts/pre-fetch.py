@@ -11,17 +11,11 @@ Usage: python3 pre-fetch.py
 import json, sys, os, re
 from datetime import datetime, timezone
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
+from briefed_common import append_private, get_gmail_service, write_private_json
 
 INBOX_FILE = os.path.join(os.path.dirname(__file__), '..', '..', 'newsletter-inbox.json')
 FILTER_CONFIG_FILE = os.path.join(os.path.dirname(__file__), '..', 'config', 'filter-rules.json')
 SKIP_LOG_FILE = os.path.join(os.path.dirname(__file__), '..', '..', 'newsletter-filter-skips.jsonl')
-TOKEN_FILE = os.environ.get('BRIEFED_GMAIL_TOKEN_FILE', os.path.expanduser('~/.openclaw/workspace/briefed-gmail-token.json'))
-CLIENT_SECRET_FILE = os.environ.get('BRIEFED_GMAIL_CLIENT_SECRET', os.path.expanduser('~/client_secret.json'))
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
 # Subject/sender substrings that mark an email as transactional (case-insensitive)
 SKIP_SUBJECT_PATTERNS = [
@@ -112,29 +106,6 @@ def load_filter_rules():
     }
 
 
-def get_gmail_service():
-    creds = None
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists(CLIENT_SECRET_FILE):
-                raise RuntimeError(
-                    f"Missing OAuth client file: {CLIENT_SECRET_FILE}\n"
-                    "Set BRIEFED_GMAIL_CLIENT_SECRET to your Google OAuth client JSON."
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
-            creds = flow.run_local_server(port=0, open_browser=True)
-
-        os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
-        with open(TOKEN_FILE, 'w') as token:
-            token.write(creds.to_json())
-
-    return build('gmail', 'v1', credentials=creds, cache_discovery=False)
-
 
 def is_transactional(subject, sender, rules):
     subj = (subject or '').lower()
@@ -172,9 +143,7 @@ def append_skip_log(thread_id, source, subject, snippet, reason):
         'snippet': (snippet or '')[:160],
         'reason': reason,
     }
-    os.makedirs(os.path.dirname(SKIP_LOG_FILE), exist_ok=True)
-    with open(SKIP_LOG_FILE, 'a') as f:
-        f.write(json.dumps(entry) + '\n')
+    append_private(SKIP_LOG_FILE, json.dumps(entry) + '\n')
 
 
 def get_sender_name(from_header):
@@ -268,8 +237,7 @@ def main():
         })
         print(f'  KEEP: {source} — {subject[:60]}')
 
-    with open(INBOX_FILE, 'w') as f:
-        json.dump({'count': len(newsletters), 'newsletters': newsletters}, f, indent=2)
+    write_private_json(INBOX_FILE, {'count': len(newsletters), 'newsletters': newsletters})
 
     print(f'\nDone. {len(newsletters)} newsletters written to newsletter-inbox.json')
 
