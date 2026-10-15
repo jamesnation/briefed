@@ -91,7 +91,7 @@ launchctl load ~/Library/LaunchAgents/ai.openclaw.briefed.plist
 3. **Delete local data:**
    ```bash
    rm -rf ~/.openclaw/workspace/briefed
-   rm -f ~/.openclaw/workspace/{briefed-gmail-token.json,newsletter-inbox.json,newsletter-today.json,newsletter-interests.json,newsletter-notes.json,newsletter-filter-skips.jsonl,reading-list.md}
+   rm -f ~/.openclaw/workspace/{briefed-gmail-token.json,newsletter-inbox.json,newsletter-today.json,newsletter-interests.json,newsletter-notes.json,newsletter-filter-rules.json,newsletter-filter-skips.jsonl,reading-list.md}
    ```
 4. **Revoke Google access:** remove your Briefed OAuth app at <https://myaccount.google.com/permissions>.
 

@@ -21,6 +21,7 @@ metadata:
         - ~/.openclaw/workspace/newsletter-today.json
         - ~/.openclaw/workspace/newsletter-interests.json
         - ~/.openclaw/workspace/newsletter-notes.json
+        - ~/.openclaw/workspace/newsletter-filter-rules.json
         - ~/.openclaw/workspace/newsletter-filter-skips.jsonl
         - ~/.openclaw/workspace/reading-list.md
 ---
@@ -195,6 +196,7 @@ All data files live in `~/.openclaw/workspace/` and are written owner-only (`060
 | `newsletter-today.json` | Today's stories with summaries + HTML bodies (overwritten daily) |
 | `newsletter-interests.json` | Topic weights + vote/open signals |
 | `newsletter-notes.json` | Per-story user notes |
+| `newsletter-filter-rules.json` | Your own filter rules (optional, survives updates) |
 | `newsletter-filter-skips.jsonl` | Audit log of emails skipped as transactional |
 | `reading-list.md` | Saved/bookmarked stories |
 
@@ -213,10 +215,22 @@ All endpoints require the token when `BRIEFED_TOKEN` is set.
 
 ## Filtering Transactional Email
 
-Edit `~/.openclaw/workspace/briefed/config/filter-rules.json`:
-- `skipSubjectPatterns` — subject substrings that flag an email as transactional
-- `skipSenders` — sender names that are always transactional (e.g. banks, shops)
-- `skipSnippetPatterns` — snippet substrings that flag an email as transactional
+Briefed skips receipts, shipping updates, security alerts and similar mail using generic rules in `config/filter-rules.json`. Matching is case-insensitive substring matching on three lists:
+
+- `skipSubjectPatterns` — subject substrings
+- `skipSenders` — sender-name substrings (e.g. banks, shops)
+- `skipSnippetPatterns` — snippet substrings
+
+To add your own rules, create `~/.openclaw/workspace/newsletter-filter-rules.json` with any of the same keys. They are added to the defaults, and the file lives outside the skill directory, so updating Briefed won't overwrite it:
+
+```json
+{
+  "skipSenders": ["my bank", "my estate agent"],
+  "skipSubjectPatterns": ["your weekly statement"]
+}
+```
+
+Keep sender patterns specific: a short pattern like `"better"` also matches newsletters such as "Better Programming".
 
 Check `newsletter-filter-skips.jsonl` to see what was skipped and why.
 
