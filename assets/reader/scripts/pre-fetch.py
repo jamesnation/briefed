@@ -11,129 +11,103 @@ Usage: python3 pre-fetch.py
 import json, sys, os, re
 from datetime import datetime, timezone
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
+from briefed_common import append_private, get_gmail_service, write_private_json
 
 INBOX_FILE = os.path.join(os.path.dirname(__file__), '..', '..', 'newsletter-inbox.json')
 FILTER_CONFIG_FILE = os.path.join(os.path.dirname(__file__), '..', 'config', 'filter-rules.json')
 SKIP_LOG_FILE = os.path.join(os.path.dirname(__file__), '..', '..', 'newsletter-filter-skips.jsonl')
-TOKEN_FILE = os.environ.get('BRIEFED_GMAIL_TOKEN_FILE', os.path.expanduser('~/.openclaw/workspace/briefed-gmail-token.json'))
-CLIENT_SECRET_FILE = os.environ.get('BRIEFED_GMAIL_CLIENT_SECRET', os.path.expanduser('~/client_secret.json'))
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+USER_FILTER_FILE = os.path.join(os.path.dirname(__file__), '..', '..', 'newsletter-filter-rules.json')
 
-# Subject/sender substrings that mark an email as transactional (case-insensitive)
+# Default rules, used when config/filter-rules.json is missing. Keep in sync with it.
+# Substrings that mark an email as transactional (case-insensitive).
 SKIP_SUBJECT_PATTERNS = [
-    'your invoice', 'your receipt', 'your order',
-    'payment confirmation', 'domain renewal', 'verify your email',
-    'password reset', 'has been charged', 'has shipped',
-    'subscription confirmed', 'unsubscribe confirmation',
-    '[action needed]', 'action required',
-    'account activity statement',
-    "you've got new correspondence",
-    'we sent your payout',
-    "we've found you",
-    'new property alert',
-    'property in ',
-    'properties in ',
-    'pre-order ',
-    'simpler pricing',
-    'data writes',
-    'api access is turned off',
-    'your claude api',
-    'members info',
-    '72-hour reminder',
-    'seiko',
-    '1 new!',
-    'suggested properties',
-    'book now!',
-    'identity document expires',
-    'document renewal',
-    'renewal reminder',
-    'account alert',
-    'withdrawal privileges',
-    'you have a new message from linkedin',
-    'linkedin notification',
-    'booking is confirmed',
-    'your dependabot alerts',
-    'mortgage deal ending soon',
-    'find your fit',
-    'help shape the future',
-    'survey',
-    'questionnaire',
-    'your appointment',
-    'appointment confirmation',
+    "your invoice",
+    "your receipt",
+    "your order",
+    "order confirmation",
+    "has shipped",
+    "has been dispatched",
+    "out for delivery",
+    "has been delivered",
+    "payment confirmation",
+    "payment received",
+    "payment failed",
+    "has been charged",
+    "refund",
+    "your statement",
+    "statement is ready",
+    "verify your email",
+    "confirm your email",
+    "password reset",
+    "reset your password",
+    "verification code",
+    "security alert",
+    "new sign-in",
+    "account alert",
+    "subscription confirmed",
+    "unsubscribe confirmation",
+    "renewal reminder",
+    "domain renewal",
+    "document renewal",
+    "[action needed]",
+    "action required",
+    "booking is confirmed",
+    "booking confirmation",
+    "reservation confirmed",
+    "your appointment",
+    "appointment confirmation",
+    "appointment reminder",
+    "your dependabot alerts",
+    "survey",
+    "questionnaire",
+    "how did we do",
+    "rate your experience",
 ]
 
 SKIP_SENDERS = [
-    'ebay', 'rightmove', 'zoopla', 'trading 212', 'tsb',
-    'barclays', 'hsbc', 'natwest', 'lloyds',
-    'amazon', 'paypal', 'stripe',
-    'kucoin', 'locrating',
-    'github',
-    'better',
-    'mangools',
-    'l&c',
+    "paypal",
+    "stripe",
+    "amazon",
+    "ebay",
+    "github",
 ]
 
 SKIP_SNIPPET_PATTERNS = [
-    'booking is confirmed',
-    'you can find full details of your booking',
-    'if your current mortgage deal',
-    'security alert digest',
-    'enable location sharing',
+    "booking is confirmed",
+    "you can find full details of your booking",
+    "verification code is",
+    "security alert digest",
+    "if you didn't request this",
 ]
 
 
-def load_filter_rules():
-    if not os.path.exists(FILTER_CONFIG_FILE):
-        return {
-            'skipSubjectPatterns': SKIP_SUBJECT_PATTERNS,
-            'skipSenders': SKIP_SENDERS,
-            'skipSnippetPatterns': SKIP_SNIPPET_PATTERNS,
-        }
-
+def read_rules_file(path):
     try:
-        with open(FILTER_CONFIG_FILE, 'r') as f:
-            raw = json.load(f)
+        with open(path, 'r') as f:
+            return json.load(f)
     except Exception as e:
-        print(f'Warning: failed to load filter config ({e}), using defaults.', file=sys.stderr)
-        return {
-            'skipSubjectPatterns': SKIP_SUBJECT_PATTERNS,
-            'skipSenders': SKIP_SENDERS,
-            'skipSnippetPatterns': SKIP_SNIPPET_PATTERNS,
-        }
-
-    return {
-        'skipSubjectPatterns': raw.get('skipSubjectPatterns', SKIP_SUBJECT_PATTERNS),
-        'skipSenders': raw.get('skipSenders', SKIP_SENDERS),
-        'skipSnippetPatterns': raw.get('skipSnippetPatterns', SKIP_SNIPPET_PATTERNS),
-    }
+        print(f'Warning: failed to load {path} ({e}), ignoring.', file=sys.stderr)
+        return {}
 
 
-def get_gmail_service():
-    creds = None
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+def load_filter_rules():
+    """Bundled rules, extended by the user's own rules file if present.
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists(CLIENT_SECRET_FILE):
-                raise RuntimeError(
-                    f"Missing OAuth client file: {CLIENT_SECRET_FILE}\n"
-                    "Set BRIEFED_GMAIL_CLIENT_SECRET to your Google OAuth client JSON."
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
-            creds = flow.run_local_server(port=0, open_browser=True)
+    User rules live outside the skill directory so reinstalling or updating
+    Briefed doesn't overwrite them.
+    """
+    bundled = read_rules_file(FILTER_CONFIG_FILE) if os.path.exists(FILTER_CONFIG_FILE) else {}
+    user = read_rules_file(USER_FILTER_FILE) if os.path.exists(USER_FILTER_FILE) else {}
 
-        os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
-        with open(TOKEN_FILE, 'w') as token:
-            token.write(creds.to_json())
-
-    return build('gmail', 'v1', credentials=creds, cache_discovery=False)
+    rules = {}
+    for key, default in [
+        ('skipSubjectPatterns', SKIP_SUBJECT_PATTERNS),
+        ('skipSenders', SKIP_SENDERS),
+        ('skipSnippetPatterns', SKIP_SNIPPET_PATTERNS),
+    ]:
+        patterns = bundled.get(key, default) + user.get(key, [])
+        rules[key] = list(dict.fromkeys(p.lower() for p in patterns))
+    return rules
 
 
 def is_transactional(subject, sender, rules):
@@ -172,9 +146,7 @@ def append_skip_log(thread_id, source, subject, snippet, reason):
         'snippet': (snippet or '')[:160],
         'reason': reason,
     }
-    os.makedirs(os.path.dirname(SKIP_LOG_FILE), exist_ok=True)
-    with open(SKIP_LOG_FILE, 'a') as f:
-        f.write(json.dumps(entry) + '\n')
+    append_private(SKIP_LOG_FILE, json.dumps(entry) + '\n')
 
 
 def get_sender_name(from_header):
@@ -268,8 +240,7 @@ def main():
         })
         print(f'  KEEP: {source} — {subject[:60]}')
 
-    with open(INBOX_FILE, 'w') as f:
-        json.dump({'count': len(newsletters), 'newsletters': newsletters}, f, indent=2)
+    write_private_json(INBOX_FILE, {'count': len(newsletters), 'newsletters': newsletters})
 
     print(f'\nDone. {len(newsletters)} newsletters written to newsletter-inbox.json')
 
